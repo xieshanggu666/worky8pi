@@ -149,3 +149,44 @@ class AuctionDefaultRepayIn(BaseModel):
 
     amount: float | None = Field(default=None, gt=0)
     idempotency_key: str | None = None
+
+
+class QuotaLoanIn(BaseModel):
+    """企业发起配额拆借协商（发起方建单即确认）。"""
+
+    lender_id: int
+    borrower_id: int
+    year: int
+    amount: float = Field(gt=0)
+    due_date: str = Field(min_length=8, max_length=10)
+    interest_rate: float = Field(default=0, ge=0)
+    # 发起方：lender=出借方挂出 / borrower=借入方求借
+    initiator: str = Field(default="lender", pattern="^(lender|borrower)$")
+    tx_date: str = ""
+    remark: str = Field(default="", max_length=256)
+    idempotency_key: str | None = None
+    # 拨付到账时是否自动用借入方到账配额核销其同年度履约缺口（默认开启）
+    auto_clear_deficit: bool = True
+    # 借入方后续交易/竞价到账时是否自动追偿其违约欠额（默认开启）
+    auto_recover_default: bool = True
+
+
+class QuotaLoanCancelIn(BaseModel):
+    reason: str = Field(default="", max_length=256)
+
+
+class QuotaLoanRejectIn(BaseModel):
+    reason: str = Field(min_length=2, max_length=256)
+
+
+class QuotaLoanRepayIn(BaseModel):
+    """借入方归还/监管追偿数量；amount 缺省为全额。"""
+
+    amount: float | None = Field(default=None, gt=0)
+    idempotency_key: str | None = None
+
+
+class QuotaLoanDefaultIn(BaseModel):
+    """监管对逾期借据宣告违约（需原因）。"""
+
+    reason: str = Field(min_length=2, max_length=500)

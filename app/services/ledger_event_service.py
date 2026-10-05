@@ -37,6 +37,7 @@ from app.models.auction import (
     AuctionTrade,
     AuctionTradeReversal,
 )
+from app.models.borrowing import QuotaLoan, QuotaLoanRepayment
 from app.models.ledger import LedgerEvent
 from app.models.report import MrvReport
 
@@ -70,6 +71,21 @@ _AUCTION_TX_SOURCE = {
     "auction_clawback_in": "auction_reversal",
     "auction_default_repay_out": "auction_repay",
     "auction_default_repay_in": "auction_repay",
+}
+# 配额借贷流水：全部以借据为业务来源，事件组挂在同一借据下，重放/对账按借据配对核对
+_LOAN_TX_SOURCE = {
+    "loan_reserve": "quota_loan",
+    "loan_release": "quota_loan",
+    "loan_disburse_out": "quota_loan",
+    "loan_disburse_in": "quota_loan",
+    "loan_deficit_clear": "quota_loan",
+    "loan_clear_refund": "quota_loan",
+    "loan_repay_out": "quota_loan_repay",
+    "loan_repay_in": "quota_loan_repay",
+    "loan_default_clawback_out": "quota_loan_repay",
+    "loan_default_clawback_in": "quota_loan_repay",
+    "loan_default_recover_out": "quota_loan_repay",
+    "loan_default_recover_in": "quota_loan_repay",
 }
 
 
@@ -176,6 +192,9 @@ def _event_exists(db: Session, source: str, source_ref: int | None, occurrence: 
 def classify_tx_source(tx: AllowanceTransaction) -> tuple[str, str]:
     """根据流水类型/关联单据返回 ``(业务来源, 事件组)``。"""
     tx_type = tx.tx_type
+    if tx.quota_loan_id is not None:
+        source = _LOAN_TX_SOURCE.get(tx_type, "quota_loan")
+        return source, f"quota_loan:{tx.quota_loan_id}"
     if tx.auction_trade_id is not None:
         source = _AUCTION_TX_SOURCE.get(tx_type, "auction_trade")
         return source, f"auction_trade:{tx.auction_trade_id}"
@@ -186,6 +205,8 @@ def classify_tx_source(tx: AllowanceTransaction) -> tuple[str, str]:
         if source == "trade_order":
             return source, f"trade_order:{tx.trade_order_id}"
         return source, f"{source}:{tx.id}"
+    if tx_type.startswith("loan_"):
+        return _LOAN_TX_SOURCE.get(tx_type, "quota_loan"), f"loan_tx:{tx.id}"
     if tx_type.startswith("auction_"):
         return _AUCTION_TX_SOURCE.get(tx_type, "auction_trade"), f"auction_tx:{tx.id}"
     return "manual_transfer", f"manual_transfer:{tx.id}"
@@ -385,9 +406,32 @@ def _status_events_for_documents(db: Session) -> list[LedgerEvent]:
                        "repaid": float(trade.repaid_amount or 0)},
             ))
 
+    # 配额借据生命周期：批准冻结 / 拨付 / 逾期 / 违约 / 归还结清 / 撤销驳回
+    for loan in db.query(QuotaLoan).all():
+        group = f"quota_loan:{loan.id}"
+        for occ, status, when in (
+            (10, "reserved", loan.reserved_at),
+            (20, "active", loan.disbursed_at),
+            (30, "overdue", loan.overdue_at),
+            (40, "defaulted", loan.defaulted_at),
+            (50, "repaid", loan.closed_at),
+            (60, "cancelled", loan.cancelled_at),
+            (70, "rejected", loan.rejected_at),
+        ):
+            if when:
+                add(_status_event(
+                    source="quota_loan", source_ref=loan.id, occurrence=occ,
+                    event_type="quota_loan_status", company_id=loan.borrower_id,
+                    year=loan.year, group=group, status=status, occurred_at=when,
+                    extra={"loan_no": loan.loan_no,
+                           "amount": float(loan.amount or 0),
+                           "returned": float(loan.returned_amount or 0),
+                           "defaulted": float(loan.defaulted_amount or 0),
+                           "recovered": float(loan.recovered_default or 0)},
+                ))
+
     # 履约记录（含冲正归档）与 MRV 报告状态
-    for rec in db.query(ComplianceRecord).all():
-        add(_status_event(
+    for rec in db.query(ComplianceRecord).all():        add(_status_event(
             source="compliance", source_ref=rec.id, occurrence=10,
             event_type="compliance_status", company_id=rec.company_id, year=rec.year,
             group=f"compliance:{rec.id}",
@@ -512,6 +556,26 @@ def backfill_ledger_events(db: Session, *, commit: bool = True) -> dict[str, int
             auction_trade_id=repay.trade_id,
             payload=_canonical({"source": repay.source, "quantity": float(repay.quantity or 0)}),
             occurred_at=repay.created_at or datetime.utcnow(),
+        ))
+
+    # 借据归还/追偿明细：以借据为组补登摘要，支撑借据单据↔账本勾稽
+    for lrp in db.query(QuotaLoanRepayment).order_by(QuotaLoanRepayment.id.asc()).all():
+        if ("quota_loan_repay_doc", lrp.id, 0) in existing_keys:
+            continue
+        reversal_events.append(LedgerEvent(
+            event_group=f"quota_loan:{lrp.loan_id}",
+            source="quota_loan_repay_doc",
+            source_ref=lrp.id,
+            occurrence=0,
+            is_legacy=1,
+            account_id=None,
+            company_id=lrp.borrower_id,
+            year=lrp.year,
+            event_type="quota_loan_repayment",
+            direction="status",
+            amount=round(float(lrp.quantity or 0), 4),
+            payload=_canonical({"source": lrp.source, "quantity": float(lrp.quantity or 0)}),
+            occurred_at=lrp.created_at or datetime.utcnow(),
         ))
 
     # 取号插入按 occurred_at/id 稳定排序，使历史链时间有序

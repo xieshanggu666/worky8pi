@@ -16,6 +16,7 @@ const TITLES = {
   quotas: "配额与交易",
   orders: "企业间订单",
   auctions: "集中竞价市场",
+  loans: "配额借贷",
   reports: "MRV 报告",
 };
 
@@ -28,6 +29,7 @@ const NAV = [
   ["quotas", "配额与交易"],
   ["orders", "企业间订单"],
   ["auctions", "集中竞价"],
+  ["loans", "配额借贷"],
   ["reports", "MRV 报告"],
 ];
 
@@ -92,6 +94,7 @@ function AppShell() {
   else if (path === "quotas") view = html`<${views.QuotaView} />`;
   else if (path === "orders") view = html`<${views.TradeOrdersView} />`;
   else if (path === "auctions") view = html`<${views.AuctionView} />`;
+  else if (path === "loans") view = html`<${views.LoanView} />`;
   else if (path === "reports") view = html`<${views.ReportsView} />`;
   else view = html`<${views.DashboardView} />`;
 

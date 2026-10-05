@@ -1250,6 +1250,22 @@ def settle_session(db: Session, session_id: int, operator: Operator | None) -> A
                                 )
                                 recovered_count += len(summary["repayments"])
 
+                        # 配额借贷违约回退链路：同一批买方若历史上有借据违约欠额，
+                        # 在结算到账且清缴/竞价追偿之后自动用剩余自由可用追偿
+                        # （借据键与出借方账户键在追偿函数内按全局锁序补齐）。
+                        from app.services.borrowing_service import (
+                            recover_borrower_loan_arrears,
+                        )
+
+                        loan_recovered_count = 0
+                        for buyer_id in buyer_ids:
+                            loan_summary = recover_borrower_loan_arrears(
+                                db, buyer_id, session.year, tx_date,
+                                source="auto",
+                                remark=f"场次 {session.session_no} 结算到账后自动追偿借据违约欠额",
+                            )
+                            loan_recovered_count += len(loan_summary["repayments"])
+
                         # 买方年度配额闭环：逐笔成交逐笔核销（先冻结后补缴，绝不触碰占用）
                         clearance_count = sum(
                             1 for t in reserved_trades
@@ -1268,7 +1284,8 @@ def settle_session(db: Session, session_id: int, operator: Operator | None) -> A
                             target_type="session", target_id=session_id, session_id=session_id,
                             detail=f"场次 {session.session_no} 统一结算：成交 {len(reserved_trades)} 笔 / "
                             f"{_num(session.matched_volume):g} 吨全部划转，联动核销买方缺口 {clearance_count} 家"
-                            + (f"，自动追偿违约欠额 {recovered_count} 笔" if recovered_count else ""),
+                            + (f"，自动追偿违约欠额 {recovered_count} 笔" if recovered_count else "")
+                            + (f"，自动追偿借据违约欠额 {loan_recovered_count} 笔" if loan_recovered_count else ""),
                         )
                         db.flush()
                         db.refresh(session)

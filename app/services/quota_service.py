@@ -38,6 +38,7 @@ from app.models.allowance import (
     TradeOrder,
 )
 from app.models.auction import AuctionTrade
+from app.models.borrowing import QuotaLoan
 from app.models.company import Company
 from app.models.report import MrvReport
 from app.services.calculation_service import annual_total, count_unverified_activities
@@ -70,6 +71,7 @@ def _add_ledger_tx(
     reserved_after: float | None = None,
     trade_order_id: int | None = None,
     auction_trade_id: int | None = None,
+    quota_loan_id: int | None = None,
     price: float | None = None,
 ) -> AllowanceTransaction:
     tx = AllowanceTransaction(
@@ -85,6 +87,7 @@ def _add_ledger_tx(
         reserved_after=round(reserved_after if reserved_after is not None else account.reserved_balance, 4),
         trade_order_id=trade_order_id,
         auction_trade_id=auction_trade_id,
+        quota_loan_id=quota_loan_id,
         remark=remark,
         idempotency_key=idempotency_key,
     )
@@ -364,6 +367,42 @@ def freeze_allowance_for_report(
         return record
 
 
+def _unrefunded_attributed_clearance(
+    db: Session, account_id: int, *, clear_type: str, refund_type: str,
+    doc_attr: str,
+) -> list[tuple[int, float]]:
+    """按关联单据汇总账户上“到账补缴”的未退还净额，返回 ``[(单据id, 净额), …]``。
+
+    通用的“单据归属补缴账”：到账即补缴（clear_type，带单据归属）与两条回退
+    链路的退还（refund_type：报告冲正与单据自身冲正/回退都会写）均按单据
+    归属记账，二者差额即仍可退还的补缴量。任意先后顺序下同一吨补缴最多
+    退还一次，系统总配额守恒。
+
+    - 竞价成交：(auction_deficit_clear, auction_clear_refund, auction_trade_id)
+    - 配额借据：(loan_deficit_clear, loan_clear_refund, quota_loan_id)
+    """
+    doc_column = getattr(AllowanceTransaction, doc_attr)
+    rows = (
+        db.query(
+            doc_column,
+            AllowanceTransaction.tx_type,
+            func.coalesce(func.sum(AllowanceTransaction.amount), 0),
+        )
+        .filter(
+            AllowanceTransaction.account_id == account_id,
+            doc_column.isnot(None),
+            AllowanceTransaction.tx_type.in_((clear_type, refund_type)),
+        )
+        .group_by(doc_column, AllowanceTransaction.tx_type)
+        .all()
+    )
+    nets: dict[int, float] = {}
+    for doc_id, tx_type, total in rows:
+        signed = float(total or 0.0) * (1 if tx_type == clear_type else -1)
+        nets[int(doc_id)] = round(nets.get(int(doc_id), 0.0) + signed, 4)
+    return [(tid, amt) for tid, amt in sorted(nets.items()) if amt > 1e-9]
+
+
 def _unrefunded_auction_clearance(db: Session, account_id: int) -> list[tuple[int, float]]:
     """按成交单汇总账户上“竞价到账补缴”的未退还净额，返回 ``[(成交单id, 净额), …]``。
 
@@ -372,25 +411,26 @@ def _unrefunded_auction_clearance(db: Session, account_id: int) -> list[tuple[in
     二者差额即仍可退还的补缴量。报告冲正与成交冲正共用同一本成交单归属
     流水账：任意先后顺序下同一吨补缴最多退还一次，系统总配额守恒。
     """
-    rows = (
-        db.query(
-            AllowanceTransaction.auction_trade_id,
-            AllowanceTransaction.tx_type,
-            func.coalesce(func.sum(AllowanceTransaction.amount), 0),
-        )
-        .filter(
-            AllowanceTransaction.account_id == account_id,
-            AllowanceTransaction.auction_trade_id.isnot(None),
-            AllowanceTransaction.tx_type.in_(("auction_deficit_clear", "auction_clear_refund")),
-        )
-        .group_by(AllowanceTransaction.auction_trade_id, AllowanceTransaction.tx_type)
-        .all()
+    return _unrefunded_attributed_clearance(
+        db, account_id,
+        clear_type="auction_deficit_clear",
+        refund_type="auction_clear_refund",
+        doc_attr="auction_trade_id",
     )
-    nets: dict[int, float] = {}
-    for trade_id, tx_type, total in rows:
-        signed = float(total or 0.0) * (1 if tx_type == "auction_deficit_clear" else -1)
-        nets[int(trade_id)] = round(nets.get(int(trade_id), 0.0) + signed, 4)
-    return [(tid, amt) for tid, amt in sorted(nets.items()) if amt > 1e-9]
+
+
+def _unrefunded_loan_clearance(db: Session, account_id: int) -> list[tuple[int, float]]:
+    """按借据汇总账户上“借据到账补缴”的未退还净额，返回 ``[(借据id, 净额), …]``。
+
+    借据拨付联动补缴（``loan_deficit_clear``）与报告冲正/借据回退的退还
+    （``loan_clear_refund``）共用同一本借据归属流水账，同一吨补缴最多退还一次。
+    """
+    return _unrefunded_attributed_clearance(
+        db, account_id,
+        clear_type="loan_deficit_clear",
+        refund_type="loan_clear_refund",
+        doc_attr="quota_loan_id",
+    )
 
 
 def reverse_approved_report(
@@ -438,13 +478,18 @@ def reverse_approved_report(
                     if account is None:
                         raise ValueError("配额账户缺失，无法安全退还配额，冲正已中止")
                     lock_row_for_write(db, account.id)
-                    # 竞价成交单归属的到账补缴按成交单逐笔退还并关联成交单
-                    # （auction_clear_refund）：监管事后冲正该成交单时，其回退链路
-                    # 按同一本成交单归属流水账计算可退余额，两条回退链路顺序无关，
-                    # 同一吨补缴不会被重复退还（否则系统总配额凭空增加）。
+                    # 单据归属的到账补缴按单据逐笔退还并关联原单据
+                    # （auction_clear_refund / loan_clear_refund）：监管事后冲正成交单、
+                    # 回退借据时，其回退链路按同一本单据归属流水账计算可退余额，
+                    # 两条回退链路顺序无关，同一吨补缴不会被重复退还
+                    # （否则系统总配额凭空增加）。
                     trade_refunds = _unrefunded_auction_clearance(db, account.id)
-                    trade_refund_total = round(sum(amt for _, amt in trade_refunds), 4)
-                    # 成交单归属补缴必然已计入 cleared；防御性封顶，退还总额不超过已清缴量
+                    loan_refunds = _unrefunded_loan_clearance(db, account.id)
+                    trade_refund_total = round(
+                        sum(amt for _, amt in trade_refunds)
+                        + sum(amt for _, amt in loan_refunds), 4
+                    )
+                    # 单据归属补缴必然已计入 cleared；防御性封顶，退还总额不超过已清缴量
                     trade_refund_total = min(trade_refund_total, cleared)
                     cleared_refund = round(cleared - trade_refund_total, 4)
 
@@ -484,7 +529,7 @@ def reverse_approved_report(
                             reserved_after=reserved_after,
                         )
 
-                    # 3) 成交单归属的已清缴部分按成交单逐笔退还（关联成交单）。
+                    # 3) 单据归属的已清缴部分按单据逐笔退还（关联原成交单/借据）。
                     budget = trade_refund_total
                     for trade_id, net in trade_refunds:
                         if budget <= 1e-9:
@@ -507,6 +552,30 @@ def reverse_approved_report(
                             f"{year}年度报告冲正：退还成交单 {trade_no} 归属的到账补缴 {amount} 吨",
                             reserved_after=reserved_after,
                             auction_trade_id=trade_id,
+                        )
+                    from app.models.borrowing import QuotaLoan
+
+                    for loan_id, net in loan_refunds:
+                        if budget <= 1e-9:
+                            break
+                        amount = round(min(net, budget), 4)
+                        budget = round(budget - amount, 4)
+                        loan = db.get(QuotaLoan, loan_id)
+                        loan_no = loan.loan_no if loan else str(loan_id)
+                        balance_after, frozen_after, reserved_after = apply_ledger_delta(
+                            db, account.id, amount, 0, 0
+                        )
+                        _add_ledger_tx(
+                            db,
+                            account,
+                            "loan_clear_refund",
+                            amount,
+                            balance_after,
+                            frozen_after,
+                            "报告冲正",
+                            f"{year}年度报告冲正：退还借据 {loan_no} 归属的到账补缴 {amount} 吨",
+                            reserved_after=reserved_after,
+                            quota_loan_id=loan_id,
                         )
 
                 record.is_active = 0
@@ -556,6 +625,7 @@ def _apply_clearance(
     idempotency_key: str | None = None,
     trade_order: "TradeOrder | None" = None,
     auction_trade: "AuctionTrade | None" = None,
+    quota_loan: "QuotaLoan | None" = None,
     create_if_absent: bool = False,
 ) -> ComplianceRecord | None:
     """清缴核销内核：在调用方已开启的写事务内执行（不自行提交/回滚/加锁）。
@@ -570,6 +640,10 @@ def _apply_clearance(
 
     ``auction_trade`` 非空表示由集中竞价结算联动触发：补扣流水记为
     ``auction_deficit_clear`` 并关联竞价成交单，同属年度配额闭环。
+
+    ``quota_loan`` 非空表示由配额借据拨付联动触发：补扣流水记为
+    ``loan_deficit_clear`` 并关联借据，借据回退/报告冲正时按同一本
+    借据归属流水账（loan_deficit_clear − loan_clear_refund）精确退还。
 
     ``create_if_absent`` 为真时（手动清缴兼容历史流程），若尚无活跃履约记录，
     按年度核算排放量新建一条；联动核销仅在既有记录上执行，不隐式建记录。
@@ -672,6 +746,7 @@ def _apply_clearance(
                 )
                 trade_order_id = trade_order.id
                 auction_trade_id = None
+                quota_loan_id = None
                 price = float(trade_order.price)
             elif auction_trade is not None:
                 seller_name = db.get(Company, auction_trade.seller_id)
@@ -683,13 +758,27 @@ def _apply_clearance(
                 )
                 trade_order_id = None
                 auction_trade_id = auction_trade.id
+                quota_loan_id = None
                 price = float(auction_trade.price)
+            elif quota_loan is not None:
+                lender = db.get(Company, quota_loan.lender_id)
+                counterparty = lender.name if lender else f"企业{quota_loan.lender_id}"
+                tx_type = "loan_deficit_clear"
+                remark = (
+                    f"借据 {quota_loan.loan_no} 拨付到账配额自动补缴{year}年度缺口 "
+                    f"{current_use} 吨"
+                )
+                trade_order_id = None
+                auction_trade_id = None
+                quota_loan_id = quota_loan.id
+                price = None
             else:
                 counterparty = "履约清缴"
                 tx_type = "clear"
                 remark = f"{year}年度可用配额履约清缴 {current_use} 吨"
                 trade_order_id = None
                 auction_trade_id = None
+                quota_loan_id = None
                 price = None
             _add_ledger_tx(
                 db,
@@ -701,10 +790,12 @@ def _apply_clearance(
                 counterparty,
                 remark,
                 tx_date=deadline,
-                idempotency_key=None if (trade_order is not None or auction_trade is not None) else idempotency_key,
+                idempotency_key=None if (trade_order is not None or auction_trade is not None
+                                        or quota_loan is not None) else idempotency_key,
                 reserved_after=reserved_after,
                 trade_order_id=trade_order_id,
                 auction_trade_id=auction_trade_id,
+                quota_loan_id=quota_loan_id,
                 price=price,
             )
 
@@ -890,4 +981,35 @@ def settle_trade_deficit_on_auction(
         trade.year,
         tx_date,
         auction_trade=trade,
+    )
+
+
+def settle_borrower_deficit_on_loan(
+    db: Session,
+    loan: "QuotaLoan",
+    tx_date: str,
+    auto_clear: bool = True,
+) -> ComplianceRecord | None:
+    """借据拨付联动清缴：用借入方刚到账配额核销其同年度履约缺口（年度配额闭环）。
+
+    必须在拨付事务内、借入方到账入账完成之后调用：调用方已持有
+    ``clear:<borrower>:<year>`` 与借入方账户键（拨付锁集合天然包含），
+    因此这里不再重复加锁、也不自行开启事务，核销与拨付同生共死。
+
+    - 借入方无活跃履约记录（尚无报告/清缴）：空操作，返回 None；
+    - 借据关闭 ``auto_clear_deficit`` 时不联动，借入方可另行手动清缴；
+    - 补缴流水记为 ``loan_deficit_clear`` 并关联借据，借据回退/报告冲正时
+      按同一本借据归属流水账精确退还，同一吨补缴最多退还一次。
+    """
+    if not auto_clear:
+        return None
+    record = _get_active_record(db, loan.borrower_id, loan.year)
+    if record is None or record.status == "reversed":
+        return None
+    return _apply_clearance(
+        db,
+        loan.borrower_id,
+        loan.year,
+        tx_date,
+        quota_loan=loan,
     )

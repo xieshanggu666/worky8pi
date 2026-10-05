@@ -53,6 +53,10 @@ const StatusBadge = (s) => {
     partial: ["warn", "部分成交"],
     unmatched: ["muted", "未成交"],
     reserved: ["warn", "待结算"],
+    overdue: ["danger", "已逾期"],
+    defaulted: ["danger", "违约追偿中"],
+    repaid: ["ok", "已清偿"],
+    rejected: ["muted", "已驳回"],
   };
   const [cls, label] = map[s] || ["muted", s];
   return `<span class="badge ${cls}">${label}</span>`;
@@ -88,6 +92,18 @@ const txLabel = {
   auction_clawback_in: "冲正退回配额",
   auction_default_repay_out: "违约欠额追偿划出",
   auction_default_repay_in: "违约欠额追偿到账",
+  loan_reserve: "借据批准冻结",
+  loan_release: "借据撤销释放冻结",
+  loan_disburse_out: "借据拨付划出",
+  loan_disburse_in: "借据拨付到账",
+  loan_deficit_clear: "借据到账清缴缺口",
+  loan_clear_refund: "冲正退还借据补缴",
+  loan_repay_out: "借据归还划出",
+  loan_repay_in: "借据归还到账",
+  loan_default_clawback_out: "违约收回划出",
+  loan_default_clawback_in: "违约收回到账",
+  loan_default_recover_out: "借据违约追偿划出",
+  loan_default_recover_in: "借据违约追偿到账",
 };
 
 const orderStatusMap = {

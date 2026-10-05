@@ -479,6 +479,17 @@ def deliver_order(db: Session, order_id: int, company_id: int) -> TradeOrder:
                 except ValueError as exc:
                     raise TradeOrderError(f"交割联动履约核销失败，整笔交割已回滚：{exc}")
 
+                # 借据违约自动追偿：买方到账且清缴完成后，用其剩余自由可用
+                # 配额偿还历史借据违约欠额（先清缴后追偿，绝不挪用履约配额）。
+                # 借据键/出借方账户键在追偿函数内按全局锁序补齐，不形成锁环。
+                from app.services.borrowing_service import recover_borrower_loan_arrears
+
+                recover_borrower_loan_arrears(
+                    db, order.buyer_id, order.year,
+                    source="auto_recovery",
+                    remark=f"订单 {order.order_no} 交割到账后自动追偿借据违约欠额",
+                )
+
                 order.delivered_at = datetime.utcnow()
                 db.flush()
                 db.refresh(order)

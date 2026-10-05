@@ -27,6 +27,13 @@ from app.services.auction_service import (  # noqa: E402
     open_session,
     place_bid,
 )
+from app.services.borrowing_service import (  # noqa: E402
+    Operator as LoanOperator,
+    approve_loan,
+    confirm_loan,
+    create_loan,
+    disburse_loan,
+)
 from app.services.calculation_service import recalc_company_year  # noqa: E402
 from app.services.mrv_service import (  # noqa: E402
     approve_report,
@@ -163,12 +170,30 @@ def main():
         operator=auction_op,
     )
 
+    # ---- 2026 年度配额拆借演示：水泥向电力拆借 30000 吨，监管已批准拨付（履约中）----
+    loan_op = LoanOperator(id=users[0].id, username="admin", role="admin")
+    demo_loan = create_loan(
+        db,
+        lender_id=companies[0].id,
+        borrower_id=companies[1].id,
+        year=next_year,
+        amount=30000,
+        due_date=f"{next_year}-11-30",
+        interest_rate=2.5,
+        initiator="lender",
+        remark="履约季临时拆借，到期随资金利息一并清偿",
+        operator=loan_op,
+    )
+    confirm_loan(db, demo_loan.id, companies[1].id)
+    approve_loan(db, demo_loan.id, loan_op)
+    disburse_loan(db, demo_loan.id, loan_op)
+
     db.commit()
     db.close()
     print(
         "初始化完成：2 家企业、4 个核算边界、3 个排放因子、4 条活动数据（2025）、2 份配额、"
         "2 份已批准 MRV 报告、2 条履约记录（含 1 次缺口补缴）、2026 年度配额、"
-        "1 个开放竞价场次 + 1 个草稿场次"
+        "1 个开放竞价场次 + 1 个草稿场次、1 笔已拨付配额拆借借据"
     )
     print("账号：admin / verifier / elec / cement，密码均为 123456")
 

@@ -71,7 +71,14 @@ class AllowanceTransaction(Base):
     # auction_reverse_out/auction_reverse_in（结算划转回退）、
     # auction_clear_unfreeze/auction_clear_refund（联动清缴回滚：解冻/退还补缴）、
     # auction_clawback_out/auction_clawback_in（违约买方配额收回并划付卖方）、
-    # auction_default_repay_out/auction_default_repay_in（违约补缴追偿）
+    # auction_default_repay_out/auction_default_repay_in（违约补缴追偿）、
+    # loan_reserve/loan_release（借据批准冻结/撤销释放）、
+    # loan_disburse_out/loan_disburse_in（借据拨付划出/到账）、
+    # loan_deficit_clear（借据到账配额自动补缴借入方履约缺口）、
+    # loan_clear_refund（借据回退/报告冲正退还其归属的到账补缴）、
+    # loan_repay_out/loan_repay_in（借据归还划出/到账）、
+    # loan_default_clawback_out/loan_default_clawback_in（宣告违约尽力收回并划付出借方）、
+    # loan_default_recover_out/loan_default_recover_in（违约欠额追偿）
     tx_type = Column(String(26), nullable=False)
     amount = Column(Numeric(18, 4), nullable=False, default=0)
     counterparty = Column(String(128), nullable=False, default="")
@@ -82,6 +89,7 @@ class AllowanceTransaction(Base):
     reserved_after = Column(Numeric(18, 4), nullable=False, default=0)  # 交易占用快照
     trade_order_id = Column(Integer, ForeignKey("trade_orders.id"), nullable=True, index=True)  # 关联企业间订单
     auction_trade_id = Column(Integer, ForeignKey("auction_trades.id"), nullable=True, index=True)  # 关联竞价成交单
+    quota_loan_id = Column(Integer, ForeignKey("quota_loans.id"), nullable=True, index=True)  # 关联配额借据
     remark = Column(String(256), nullable=False, default="")
     idempotency_key = Column(String(64), nullable=True)  # 客户端去重键（UUID），同账户唯一
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

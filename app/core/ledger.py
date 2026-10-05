@@ -62,6 +62,16 @@ def auction_session_key(session_id: int) -> str:
     return f"auction:{session_id}"
 
 
+def quota_loan_key(loan_id: int) -> str:
+    """配额借据键：协商/冻结/拨付/归还/违约追偿的进程内串行化。
+
+    锁序位于 ``clear:`` 与 ``order:`` 之间
+    （account < auction < clear < loan < order，按键名字典序天然成立）；
+    借据自动追偿可能被订单交割、竞价结算事务嵌套触发，统一按名排序取锁不形成锁环。
+    """
+    return f"loan:{loan_id}"
+
+
 def _get_lock(key: str) -> threading.RLock:
     with _locks_guard:
         lock = _locks.get(key)

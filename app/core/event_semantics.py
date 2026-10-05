@@ -125,6 +125,35 @@ SEMANTICS: dict[str, EventSemantics] = {
                                    paired=True, pair_side="out", description="违约追偿划出"),
     "auction_default_repay_in": v("auction_default_repay_in", "credit", "auction",
                                   paired=True, pair_side="in", description="违约追偿到账"),
+    # 配额借贷（企业间配额拆借）
+    "loan_reserve": v("loan_reserve", "reserve", "borrowing",
+                      description="借据批准冻结出借方自由可用"),
+    "loan_release": v("loan_release", "release", "borrowing", compensating=True,
+                      description="借据撤销释放借贷冻结"),
+    "loan_disburse_out": v("loan_disburse_out", "debit_release", "borrowing", paired=True,
+                           pair_side="out", description="借据拨付划出（冻结出库）"),
+    "loan_disburse_in": v("loan_disburse_in", "credit", "borrowing", paired=True,
+                          pair_side="in", description="借据拨付借入方到账"),
+    "loan_deficit_clear": v("loan_deficit_clear", "debit", "compliance",
+                            description="借据到账配额补缴借入方履约缺口"),
+    "loan_clear_refund": v("loan_clear_refund", "credit", "compliance", compensating=True,
+                           description="退还借据归属的到账补缴（报告冲正/借据回退）"),
+    "loan_repay_out": v("loan_repay_out", "debit", "borrowing", paired=True,
+                        pair_side="out", description="借据归还划出"),
+    "loan_repay_in": v("loan_repay_in", "credit", "borrowing", paired=True,
+                       pair_side="in", description="借据归还到账"),
+    "loan_default_clawback_out": v("loan_default_clawback_out", "debit", "borrowing",
+                                   paired=True, pair_side="out", compensating=True,
+                                   description="宣告违约自借入方收回"),
+    "loan_default_clawback_in": v("loan_default_clawback_in", "credit", "borrowing",
+                                  paired=True, pair_side="in", compensating=True,
+                                  description="宣告违约划付出借方"),
+    "loan_default_recover_out": v("loan_default_recover_out", "debit", "borrowing",
+                                  paired=True, pair_side="out",
+                                  description="借据违约欠额追偿划出"),
+    "loan_default_recover_in": v("loan_default_recover_in", "credit", "borrowing",
+                                 paired=True, pair_side="in",
+                                 description="借据违约欠额追偿到账"),
     # 历史遗留类型（旧记录兼容）
     "offset": v("offset", "debit", "unknown", description="历史抵销清缴（旧类型）"),
 }
@@ -139,6 +168,7 @@ BUSINESS_STATUS_EVENTS: dict[str, str] = {
     "auction_trade_status": "auction",
     "compliance_status": "compliance",
     "report_status": "compliance",
+    "quota_loan_status": "borrowing",
 }
 
 

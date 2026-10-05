@@ -14,6 +14,11 @@ from app.models.auction import (
     AuctionTrade,
     AuctionTradeReversal,
 )
+from app.models.borrowing import (
+    QuotaLoan,
+    QuotaLoanAuditLog,
+    QuotaLoanRepayment,
+)
 from app.models.company import Company, EmissionScope
 from app.models.emission import (
     ActivityData,
@@ -51,6 +56,9 @@ __all__ = [
     "AuctionReversalBatch",
     "AuctionDefaultRepayment",
     "AuctionAuditLog",
+    "QuotaLoan",
+    "QuotaLoanRepayment",
+    "QuotaLoanAuditLog",
     "MrvReport",
     "LedgerEvent",
     "LedgerCheckpoint",
