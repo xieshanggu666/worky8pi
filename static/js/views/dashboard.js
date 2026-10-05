@@ -23,6 +23,7 @@ views.DashboardView = () => {
       <div class="card"><div class="label">累计排放量</div><div class="value">${fmtNum(stats.emission_total)} tCO2e</div><div class="sub">核算结果汇总</div></div>
       <div class="card"><div class="label">配额总量</div><div class="value">${fmtNum(stats.quota_total)} t</div><div class="sub">年度免费配额</div></div>
       <div class="card"><div class="label">冻结配额</div><div class="value">${fmtNum(stats.frozen_total)} t</div><div class="sub">批准报告待清缴</div></div>
+      <div class="card"><div class="label">在贷未偿</div><div class="value">${fmtNum(stats.outstanding_loan_total || 0)} t</div><div class="sub">${stats.overdue_loan_count || 0} 笔逾期/违约待追偿</div></div>
       <div class="card"><div class="label">履约达标率</div><div class="value">${complianceRate}%</div><div class="sub">达标 ${cc.compliant || 0} · 缺口 ${cc.deficit || 0} · 待清缴 ${cc.pending || 0}</div></div>
     </div>
     <div class="panel">

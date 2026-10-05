@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import func, update
 from sqlalchemy.exc import IntegrityError
@@ -41,6 +42,9 @@ from app.models.auction import AuctionTrade
 from app.models.company import Company
 from app.models.report import MrvReport
 from app.services.calculation_service import annual_total, count_unverified_activities
+
+if TYPE_CHECKING:
+    from app.models.loan import QuotaLoan
 
 def _today() -> str:
     return datetime.utcnow().strftime("%Y-%m-%d")
@@ -70,6 +74,7 @@ def _add_ledger_tx(
     reserved_after: float | None = None,
     trade_order_id: int | None = None,
     auction_trade_id: int | None = None,
+    loan_id: int | None = None,
     price: float | None = None,
 ) -> AllowanceTransaction:
     tx = AllowanceTransaction(
@@ -85,6 +90,7 @@ def _add_ledger_tx(
         reserved_after=round(reserved_after if reserved_after is not None else account.reserved_balance, 4),
         trade_order_id=trade_order_id,
         auction_trade_id=auction_trade_id,
+        loan_id=loan_id,
         remark=remark,
         idempotency_key=idempotency_key,
     )
@@ -556,6 +562,7 @@ def _apply_clearance(
     idempotency_key: str | None = None,
     trade_order: "TradeOrder | None" = None,
     auction_trade: "AuctionTrade | None" = None,
+    quota_loan: "QuotaLoan | None" = None,
     create_if_absent: bool = False,
 ) -> ComplianceRecord | None:
     """清缴核销内核：在调用方已开启的写事务内执行（不自行提交/回滚/加锁）。
@@ -570,6 +577,10 @@ def _apply_clearance(
 
     ``auction_trade`` 非空表示由集中竞价结算联动触发：补扣流水记为
     ``auction_deficit_clear`` 并关联竞价成交单，同属年度配额闭环。
+
+    ``quota_loan`` 非空表示由配额借贷放款联动触发：补扣流水记为
+    ``loan_deficit_clear`` 并关联借贷单——借入配额到账即用于履约，
+    到期仍须用自有自由可用配额归还。
 
     ``create_if_absent`` 为真时（手动清缴兼容历史流程），若尚无活跃履约记录，
     按年度核算排放量新建一条；联动核销仅在既有记录上执行，不隐式建记录。
@@ -672,6 +683,7 @@ def _apply_clearance(
                 )
                 trade_order_id = trade_order.id
                 auction_trade_id = None
+                f_loan_id = None
                 price = float(trade_order.price)
             elif auction_trade is not None:
                 seller_name = db.get(Company, auction_trade.seller_id)
@@ -683,13 +695,27 @@ def _apply_clearance(
                 )
                 trade_order_id = None
                 auction_trade_id = auction_trade.id
+                f_loan_id = None
                 price = float(auction_trade.price)
+            elif quota_loan is not None:
+                lender = db.get(Company, quota_loan.lender_id)
+                counterparty = lender.name if lender else f"企业{quota_loan.lender_id}"
+                tx_type = "loan_deficit_clear"
+                remark = (
+                    f"借贷 {quota_loan.loan_no} 放款到账配额自动补缴{year}年度缺口 "
+                    f"{current_use} 吨"
+                )
+                trade_order_id = None
+                auction_trade_id = None
+                f_loan_id = quota_loan.id
+                price = float(quota_loan.price or 0)
             else:
                 counterparty = "履约清缴"
                 tx_type = "clear"
                 remark = f"{year}年度可用配额履约清缴 {current_use} 吨"
                 trade_order_id = None
                 auction_trade_id = None
+                f_loan_id = None
                 price = None
             _add_ledger_tx(
                 db,
@@ -701,10 +727,11 @@ def _apply_clearance(
                 counterparty,
                 remark,
                 tx_date=deadline,
-                idempotency_key=None if (trade_order is not None or auction_trade is not None) else idempotency_key,
+                idempotency_key=None if (trade_order is not None or auction_trade is not None or quota_loan is not None) else idempotency_key,
                 reserved_after=reserved_after,
                 trade_order_id=trade_order_id,
                 auction_trade_id=auction_trade_id,
+                loan_id=f_loan_id,
                 price=price,
             )
 
@@ -890,4 +917,35 @@ def settle_trade_deficit_on_auction(
         trade.year,
         tx_date,
         auction_trade=trade,
+    )
+
+
+def settle_borrower_deficit_on_loan(
+    db: Session,
+    loan: "QuotaLoan",
+    tx_date: str,
+    auto_clear: bool = True,
+) -> ComplianceRecord | None:
+    """借贷放款联动清缴：用借入方刚到账配额核销其同年度履约缺口（年度配额闭环）。
+
+    必须在放款事务内、出借方出库/借入方到账完成之后调用：调用方已持有
+    ``clear:<borrower>:<year>`` 与双方账户键（借贷锁集合天然包含），
+    因此这里不再重复加锁、也不自行开启事务，核销与放款同生共死。
+
+    - 借入方无活跃履约记录（尚无报告/清缴）：空操作，返回 None；
+    - 优先核销已冻结配额（借入方自有冻结，流水不关联借贷单），再用自由可用
+      （含本次借入到账）补扣缺口，补扣流水记为 ``loan_deficit_clear`` 并关联借贷单；
+    - 借贷单关闭 ``auto_clear_deficit`` 时不联动，借入方自行决定清缴时机。
+    """
+    if not auto_clear:
+        return None
+    record = _get_active_record(db, loan.borrower_id, loan.year)
+    if record is None or record.status == "reversed":
+        return None
+    return _apply_clearance(
+        db,
+        loan.borrower_id,
+        loan.year,
+        tx_date,
+        quota_loan=loan,
     )

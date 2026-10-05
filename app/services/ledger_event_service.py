@@ -38,6 +38,7 @@ from app.models.auction import (
     AuctionTradeReversal,
 )
 from app.models.ledger import LedgerEvent
+from app.models.loan import QuotaLoan, QuotaLoanRepayment
 from app.models.report import MrvReport
 
 # 全局序号分配锁：与业务账户键锁不同，它只保护“取号→插入”的极短临界区
@@ -70,6 +71,15 @@ _AUCTION_TX_SOURCE = {
     "auction_clawback_in": "auction_reversal",
     "auction_default_repay_out": "auction_repay",
     "auction_default_repay_in": "auction_repay",
+}
+_LOAN_TX_SOURCE = {
+    "loan_reserve": "quota_loan",
+    "loan_release": "quota_loan",
+    "loan_deliver_out": "quota_loan",
+    "loan_deliver_in": "quota_loan",
+    "loan_repay_out": "quota_loan_repay",
+    "loan_repay_in": "quota_loan_repay",
+    "loan_deficit_clear": "quota_loan",
 }
 
 
@@ -179,6 +189,9 @@ def classify_tx_source(tx: AllowanceTransaction) -> tuple[str, str]:
     if tx.auction_trade_id is not None:
         source = _AUCTION_TX_SOURCE.get(tx_type, "auction_trade")
         return source, f"auction_trade:{tx.auction_trade_id}"
+    if tx.loan_id is not None:
+        source = _LOAN_TX_SOURCE.get(tx_type, "quota_loan")
+        return source, f"quota_loan:{tx.loan_id}"
     if tx.trade_order_id is not None:
         return "trade_order", f"trade_order:{tx.trade_order_id}"
     source = _TX_SOURCE.get(tx_type)
@@ -188,6 +201,8 @@ def classify_tx_source(tx: AllowanceTransaction) -> tuple[str, str]:
         return source, f"{source}:{tx.id}"
     if tx_type.startswith("auction_"):
         return _AUCTION_TX_SOURCE.get(tx_type, "auction_trade"), f"auction_tx:{tx.id}"
+    if tx_type.startswith("loan_"):
+        return _LOAN_TX_SOURCE.get(tx_type, "quota_loan"), f"loan_tx:{tx.id}"
     return "manual_transfer", f"manual_transfer:{tx.id}"
 
 
@@ -236,6 +251,7 @@ def record_event_for_tx(
         amount=round(float(tx.amount or 0), 4),
         trade_order_id=tx.trade_order_id,
         auction_trade_id=tx.auction_trade_id,
+        loan_id=getattr(tx, "loan_id", None),
         idempotency_key=tx.idempotency_key,
         payload=payload,
         created_at=tx.created_at or datetime.utcnow(),
@@ -406,6 +422,28 @@ def _status_events_for_documents(db: Session) -> list[LedgerEvent]:
             extra={"emission": float(report.total_emission or 0)},
         ))
 
+    # 配额借贷单：确认/放款/逾期/违约/清偿/撤销等状态时点
+    for loan in db.query(QuotaLoan).all():
+        group = f"quota_loan:{loan.id}"
+        for occ, status, when in (
+            (10, "confirmed", loan.confirmed_at),
+            (20, "active", loan.disbursed_at),
+            (30, "overdue", loan.overdue_at),
+            (40, "defaulted", loan.defaulted_at),
+            (50, "repaid", loan.repaid_at),
+            (50, "cancelled", loan.cancelled_at),
+        ):
+            if when:
+                add(_status_event(
+                    source="quota_loan", source_ref=loan.id, occurrence=occ,
+                    event_type="loan_status", company_id=loan.borrower_id, year=loan.year,
+                    group=group, status=status, occurred_at=when,
+                    extra={"loan_no": loan.loan_no,
+                           "amount": float(loan.amount or 0),
+                           "repaid": float(loan.repaid_amount or 0),
+                           "defaulted": float(loan.defaulted_amount or 0)},
+                ))
+
     return events
 
 
@@ -460,6 +498,7 @@ def backfill_ledger_events(db: Session, *, commit: bool = True) -> dict[str, int
             amount=round(float(tx.amount or 0), 4),
             trade_order_id=tx.trade_order_id,
             auction_trade_id=tx.auction_trade_id,
+            loan_id=getattr(tx, "loan_id", None),
             idempotency_key=tx.idempotency_key,
             payload=payload,
             created_at=tx.created_at or datetime.utcnow(),
@@ -512,6 +551,27 @@ def backfill_ledger_events(db: Session, *, commit: bool = True) -> dict[str, int
             auction_trade_id=repay.trade_id,
             payload=_canonical({"source": repay.source, "quantity": float(repay.quantity or 0)}),
             occurred_at=repay.created_at or datetime.utcnow(),
+        ))
+    # 配额借贷归还/追偿凭据
+    for lrep in db.query(QuotaLoanRepayment).order_by(QuotaLoanRepayment.id.asc()).all():
+        if ("quota_loan_repay_doc", lrep.id, 0) in existing_keys:
+            continue
+        reversal_events.append(LedgerEvent(
+            event_group=f"quota_loan:{lrep.loan_id}",
+            source="quota_loan_repay_doc",
+            source_ref=lrep.id,
+            occurrence=0,
+            is_legacy=1,
+            account_id=None,
+            company_id=lrep.borrower_id,
+            year=lrep.year,
+            event_type="quota_loan_repayment",
+            direction="status",
+            amount=round(float(lrep.quantity or 0), 4),
+            loan_id=lrep.loan_id,
+            payload=_canonical({"kind": lrep.kind, "source": lrep.source,
+                                "quantity": float(lrep.quantity or 0)}),
+            occurred_at=lrep.created_at or datetime.utcnow(),
         ))
 
     # 取号插入按 occurred_at/id 稳定排序，使历史链时间有序

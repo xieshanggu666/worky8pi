@@ -28,6 +28,13 @@ from app.services.auction_service import (  # noqa: E402
     place_bid,
 )
 from app.services.calculation_service import recalc_company_year  # noqa: E402
+from app.services.loan_service import (  # noqa: E402
+    Operator as LoanOperator,
+    confirm_loan as confirm_quota_loan,
+    create_loan,
+    disburse_loan,
+    repay_loan,
+)
 from app.services.mrv_service import (  # noqa: E402
     approve_report,
     generate_report,
@@ -163,12 +170,42 @@ def main():
         operator=auction_op,
     )
 
+    # ---- 2026 年度配额借贷演示：恒固水泥向绿能电力借入 50,000 吨（已确认待放款）----
+    demo_loan = create_loan(
+        db,
+        lender_id=companies[0].id,
+        borrower_id=companies[1].id,
+        year=next_year,
+        amount=50000,
+        price=5,
+        initiator="borrower",
+        due_date=f"{next_year}-11-30",
+        remark="履约季临时周转借入",
+    )
+    confirm_quota_loan(db, demo_loan.id, companies[0].id)  # 出借方确认，冻结占用
+    # 另一笔已放款并部分归还的借贷，展示在贷/清偿状态
+    settled_loan = create_loan(
+        db,
+        lender_id=companies[0].id,
+        borrower_id=companies[1].id,
+        year=next_year,
+        amount=20000,
+        price=4,
+        initiator="lender",
+        due_date=f"{next_year}-10-31",
+        remark="短期流动性支持",
+    )
+    confirm_quota_loan(db, settled_loan.id, companies[1].id)
+    disburse_loan(db, settled_loan.id, companies[0].id)
+    loan_op = LoanOperator(id=users[0].id, username="admin", role="admin")
+    repay_loan(db, settled_loan.id, loan_op, amount=12000)
+
     db.commit()
     db.close()
     print(
         "初始化完成：2 家企业、4 个核算边界、3 个排放因子、4 条活动数据（2025）、2 份配额、"
         "2 份已批准 MRV 报告、2 条履约记录（含 1 次缺口补缴）、2026 年度配额、"
-        "1 个开放竞价场次 + 1 个草稿场次"
+        "1 个开放竞价场次 + 1 个草稿场次、2 张配额借贷单（1 笔待放款、1 笔在贷部分归还）"
     )
     print("账号：admin / verifier / elec / cement，密码均为 123456")
 

@@ -86,6 +86,7 @@ class LedgerEvent(Base):
 
     trade_order_id = Column(Integer, ForeignKey("trade_orders.id"), nullable=True, index=True)
     auction_trade_id = Column(Integer, ForeignKey("auction_trades.id"), nullable=True, index=True)
+    loan_id = Column(Integer, ForeignKey("quota_loans.id"), nullable=True, index=True)
     compliance_record_id = Column(Integer, ForeignKey("compliance_records.id"), nullable=True, index=True)
     idempotency_key = Column(String(64), nullable=True, index=True)
 

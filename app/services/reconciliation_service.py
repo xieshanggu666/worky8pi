@@ -48,6 +48,7 @@ from app.models.auction import (
     AuctionTradeReversal,
 )
 from app.models.ledger import LedgerCheckpoint, LedgerEvent, LedgerReconciliation
+from app.models.loan import QuotaLoan, QuotaLoanRepayment
 from app.models.report import MrvReport
 from app.services.ledger_event_service import compute_chain_hash
 from app.services.replay_service import replay_all
@@ -69,10 +70,15 @@ _PAIRS: dict[str, tuple[str, str]] = {
     "auction_deliver": ("auction_deliver_out", "auction_deliver_in"),
     "auction_clawback": ("auction_clawback_out", "auction_clawback_in"),
     "auction_default_repay": ("auction_default_repay_out", "auction_default_repay_in"),
+    "loan_deliver": ("loan_deliver_out", "loan_deliver_in"),
+    "loan_repay": ("loan_repay_out", "loan_repay_in"),
 }
 
 # 清缴出库（离仓）与冲正退还（回仓）类型
-_CLEAR_OUT_TYPES = ("clear", "frozen_clear", "trade_deficit_clear", "auction_deficit_clear")
+_CLEAR_OUT_TYPES = (
+    "clear", "frozen_clear", "trade_deficit_clear", "auction_deficit_clear",
+    "loan_deficit_clear",
+)
 _CLEAR_REFUND_TYPES = ("reversal", "auction_clear_refund")
 
 
@@ -309,6 +315,7 @@ def check_flows(db: Session, issues: list[dict], *,
 
 def _sum_tx(db: Session, *, account_id: int | None = None, tx_types: tuple[str, ...],
             trade_order_id: int | None = None, auction_trade_id: int | None = None,
+            loan_id: int | None = None,
             company_id: int | None = None, year: int | None = None) -> float:
     q = db.query(func.coalesce(func.sum(AllowanceTransaction.amount), 0)).filter(
         AllowanceTransaction.tx_type.in_(tx_types)
@@ -319,6 +326,8 @@ def _sum_tx(db: Session, *, account_id: int | None = None, tx_types: tuple[str, 
         q = q.filter(AllowanceTransaction.trade_order_id == trade_order_id)
     if auction_trade_id is not None:
         q = q.filter(AllowanceTransaction.auction_trade_id == auction_trade_id)
+    if loan_id is not None:
+        q = q.filter(AllowanceTransaction.loan_id == loan_id)
     if company_id is not None:
         q = q.filter(AllowanceTransaction.company_id == company_id)
     if year is not None:
@@ -477,6 +486,90 @@ def check_documents(db: Session, issues: list[dict], *,
                f"竞价报价占用 {reserve:.4f} ≠ 释放 {release:.4f} + 结算出库 {deliver_out:.4f}"
                + ("（指定范围内可能有在途占用）" if company_id is None or year is None else ""),
                company_id=company_id, year=year)
+
+    # 4.5 配额借贷：占用必释放或随放款出库；放款配对；归还累计=流水=凭据≤放款量
+    loan_q = db.query(QuotaLoan)
+    if company_id is not None:
+        loan_q = loan_q.filter(
+            (QuotaLoan.lender_id == company_id) | (QuotaLoan.borrower_id == company_id)
+        )
+    if year is not None:
+        loan_q = loan_q.filter(QuotaLoan.year == year)
+    for loan in loan_q.all():
+        amount = float(loan.amount)
+        reserved = _sum_tx(db, tx_types=("loan_reserve",), loan_id=loan.id)
+        released = _sum_tx(db, tx_types=("loan_release",), loan_id=loan.id)
+        out = _sum_tx(db, tx_types=("loan_deliver_out",), loan_id=loan.id)
+        inn = _sum_tx(db, tx_types=("loan_deliver_in",), loan_id=loan.id)
+        repaid_out = _sum_tx(db, tx_types=("loan_repay_out",), loan_id=loan.id)
+        repaid_in = _sum_tx(db, tx_types=("loan_repay_in",), loan_id=loan.id)
+        repaid_docs = round(float(
+            db.query(func.coalesce(func.sum(QuotaLoanRepayment.quantity), 0))
+            .filter(QuotaLoanRepayment.loan_id == loan.id).scalar() or 0
+        ), 4)
+        repaid_amount = float(loan.repaid_amount or 0)
+        defaulted_amount = float(loan.defaulted_amount or 0)
+
+        # 占用闭合仅对终结借贷单强制（已放款：占用全部出库；已撤销：占用全部释放）；
+        # confirmed 是“占用在途待放款”的合法中间态（与竞价撮合后待结算同理），
+        # 仅要求其净占用等于借贷量，pending 要求零占用。
+        if loan.status in ("active", "overdue", "defaulted", "repaid", "cancelled"):
+            if not _near(reserved, released + out):
+                _issue(issues, "LOAN_RESERVE_NOT_CLOSED", "error",
+                       f"借贷 {loan.loan_no} 占用 {reserved:.4f} ≠ 释放 {released:.4f} + 放款出库 "
+                       f"{out:.4f}", loan_id=loan.id, reserved=reserved,
+                       released=released, disbursed_out=out)
+        if loan.status in ("confirmed",):
+            if not _near(reserved - released, amount):
+                _issue(issues, "LOAN_CONFIRMED_RESERVE_MISMATCH", "error",
+                       f"借贷 {loan.loan_no} 处于 confirmed 但净占用不等于借贷量", loan_id=loan.id)
+        if loan.status == "pending" and not _near(reserved, 0):
+            _issue(issues, "LOAN_PENDING_RESERVE_LEAK", "error",
+                   f"借贷 {loan.loan_no} 尚未双方确认却存在出借占用 {reserved:.4f}",
+                   loan_id=loan.id)
+        if loan.status in ("active", "overdue", "defaulted", "repaid"):
+            if not _near(out, amount) or not _near(inn, amount):
+                _issue(issues, "LOAN_DISBURSE_AMOUNT_MISMATCH", "error",
+                       f"借贷 {loan.loan_no} 状态 {loan.status} 但放款出库 {out:.4f}/到账 "
+                       f"{inn:.4f} 与借贷量 {amount:.4f} 不一致",
+                       loan_id=loan.id, out=out, inn=inn, amount=amount)
+        if loan.status == "cancelled" and not _near(released, reserved):
+            _issue(issues, "LOAN_CANCEL_RESERVE_LEAK", "error",
+                   f"借贷 {loan.loan_no} 已撤销但出借占用未足额释放", loan_id=loan.id)
+
+        # 归还三处勾稽：借入方划出 = 出借方到账 = 归还凭据合计 = 借贷单已还量
+        if not (
+            _near(repaid_out, repaid_in)
+            and _near(repaid_out, repaid_docs)
+            and _near(repaid_out, repaid_amount)
+        ):
+            _issue(issues, "LOAN_REPAY_TOTAL_MISMATCH", "error",
+                   f"借贷 {loan.loan_no} 归还划出 {repaid_out:.4f}/到账 {repaid_in:.4f}/"
+                   f"凭据 {repaid_docs:.4f}/借贷单已还 {repaid_amount:.4f} 四处不一致",
+                   loan_id=loan.id)
+        if repaid_amount - amount > _EPS:
+            _issue(issues, "LOAN_REPAY_EXCEEDS_AMOUNT", "error",
+                   f"借贷 {loan.loan_no} 累计归还 {repaid_amount:.4f} 超过借贷量 {amount:.4f}",
+                   loan_id=loan.id)
+        if loan.status == "repaid" and not _near(repaid_amount, amount):
+            _issue(issues, "LOAN_REPAID_STATUS_DIRTY", "error",
+                   f"借贷 {loan.loan_no} 标记 repaid 但已还 {repaid_amount:.4f} ≠ 借贷量 "
+                   f"{amount:.4f}", loan_id=loan.id)
+        if loan.status == "defaulted" and defaulted_amount <= 0:
+            _issue(issues, "LOAN_DEFAULT_WITHOUT_AMOUNT", "error",
+                   f"借贷 {loan.loan_no} 标记 defaulted 但未登记违约欠额快照", loan_id=loan.id)
+        # 违约欠额是宣布违约时点的未偿余额快照（不再随后续追偿回改）：
+        # 宣布违约时“此前已还 + 欠额快照 = 借贷量”，追偿只增 repaid_amount，
+        # 因此任何时点 repaid + defaulted ≥ amount 且 defaulted ≤ amount。
+        if defaulted_amount - amount > _EPS:
+            _issue(issues, "LOAN_DEFAULT_AMOUNT_INVALID", "error",
+                   f"借贷 {loan.loan_no} 违约欠额 {defaulted_amount:.4f} 超过借贷量 {amount:.4f}",
+                   loan_id=loan.id)
+        if defaulted_amount > _EPS and repaid_amount + defaulted_amount + _EPS < amount:
+            _issue(issues, "LOAN_DEFAULT_REPAY_IDENTITY", "error",
+                   f"借贷 {loan.loan_no} 已还 {repaid_amount:.4f} + 违约欠额 "
+                   f"{defaulted_amount:.4f} < 借贷量 {amount:.4f}，欠额快照与归还不勾稽",
+                   loan_id=loan.id)
 
 
 # --------------------------------------------------------------------------- #
@@ -676,6 +769,16 @@ def check_conservation(db: Session, issues: list[dict], *,
                    f"流水 {tx.id} 所在账户年度 {account.year} 与订单 {order.order_no} "
                    f"年度 {order.year} 不一致，跨年度串账",
                    tx_id=tx.id, order_id=order.id)
+    for tx in db.query(AllowanceTransaction).filter(
+        AllowanceTransaction.loan_id.isnot(None)
+    ).all():
+        loan = db.get(QuotaLoan, tx.loan_id)
+        account = db.get(AllowanceAccount, tx.account_id)
+        if loan and account and loan.year != account.year:
+            _issue(issues, "CROSS_YEAR_LOAN_ACCOUNT_MISMATCH", "error",
+                   f"流水 {tx.id} 所在账户年度 {account.year} 与借贷 {loan.loan_no} "
+                   f"年度 {loan.year} 不一致，跨年度串账",
+                   tx_id=tx.id, loan_id=loan.id)
     return summary
 
 

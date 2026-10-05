@@ -149,3 +149,38 @@ class AuctionDefaultRepayIn(BaseModel):
 
     amount: float | None = Field(default=None, gt=0)
     idempotency_key: str | None = None
+
+
+class QuotaLoanIn(BaseModel):
+    """企业间配额借贷：出借挂出 / 借入求借，双方确认后冻结、放款。"""
+
+    lender_id: int
+    borrower_id: int
+    year: int
+    amount: float = Field(gt=0)
+    price: float = Field(default=0, ge=0)
+    # 发起方：lender=出借方挂出 / borrower=借入方求借，发起方建单即视为已确认
+    initiator: str = Field(default="lender", pattern="^(lender|borrower)$")
+    due_date: str = Field(min_length=8, max_length=10)
+    tx_date: str = ""
+    remark: str = Field(default="", max_length=256)
+    idempotency_key: str | None = None
+    # 放款到账是否自动核销借入方同年度履约缺口（默认开启，年度配额闭环）
+    auto_clear_deficit: bool = True
+    # 借入方后续交易/竞价到账时是否自动追偿逾期/违约欠额（默认开启）
+    auto_recover_default: bool = True
+
+
+class QuotaLoanCancelIn(BaseModel):
+    reason: str = Field(default="", max_length=256)
+
+
+class QuotaLoanRepayIn(BaseModel):
+    """借入方/监管手动归还：amount 缺省为剩余未偿余额（一次性清偿）。"""
+
+    amount: float | None = Field(default=None, gt=0)
+    idempotency_key: str | None = None
+
+
+class QuotaLoanDefaultIn(BaseModel):
+    reason: str = Field(min_length=2, max_length=500)

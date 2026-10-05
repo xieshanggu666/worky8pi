@@ -125,6 +125,20 @@ SEMANTICS: dict[str, EventSemantics] = {
                                    paired=True, pair_side="out", description="违约追偿划出"),
     "auction_default_repay_in": v("auction_default_repay_in", "credit", "auction",
                                   paired=True, pair_side="in", description="违约追偿到账"),
+    # 配额借贷
+    "loan_reserve": v("loan_reserve", "reserve", "loan", description="借贷双方确认占用"),
+    "loan_release": v("loan_release", "release", "loan", compensating=True,
+                      description="借贷撤销释放占用"),
+    "loan_deliver_out": v("loan_deliver_out", "debit_release", "loan", paired=True,
+                          pair_side="out", description="借贷放款划出（占用出库）"),
+    "loan_deliver_in": v("loan_deliver_in", "credit", "loan", paired=True,
+                         pair_side="in", description="借贷放款到账"),
+    "loan_repay_out": v("loan_repay_out", "debit", "loan", paired=True,
+                        pair_side="out", description="借贷归还/追偿划出"),
+    "loan_repay_in": v("loan_repay_in", "credit", "loan", paired=True,
+                       pair_side="in", description="借贷归还/追偿到账"),
+    "loan_deficit_clear": v("loan_deficit_clear", "debit", "loan",
+                            description="借贷放款到账配额补缴缺口"),
     # 历史遗留类型（旧记录兼容）
     "offset": v("offset", "debit", "unknown", description="历史抵销清缴（旧类型）"),
 }
@@ -139,6 +153,7 @@ BUSINESS_STATUS_EVENTS: dict[str, str] = {
     "auction_trade_status": "auction",
     "compliance_status": "compliance",
     "report_status": "compliance",
+    "loan_status": "loan",
 }
 
 

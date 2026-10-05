@@ -50,6 +50,7 @@ from app.models.allowance import (
     TradeOrder,
 )
 from app.models.company import Company
+from app.services.loan_service import auto_recover_borrower_loans, overdue_loan_recovery_keys
 from app.services.quota_service import settle_buyer_deficit_on_delivery
 
 # 订单状态
@@ -415,7 +416,12 @@ def deliver_order(db: Session, order_id: int, company_id: int) -> TradeOrder:
     seller_account = _get_account(db, order.seller_id, order.year)
     buyer_account = _get_account(db, order.buyer_id, order.year)
 
-    with locked_accounts(_lock_keys_for(seller_account, buyer_account, order.id)):
+    # 交割到账后可能自动追偿买方历史逾期/违约借贷欠额：提前把相关借贷键与
+    # 受影响出借方账户键并入锁集合（键名字典序满足 account < clear < loan < order）。
+    recovery_keys = overdue_loan_recovery_keys(db, order.buyer_id, order.year)
+    all_keys = sorted(set(_lock_keys_for(seller_account, buyer_account, order.id) + recovery_keys))
+
+    with locked_accounts(all_keys):
         order = _get_order(db, order_id)
         if order.status == DELIVERED:
             db.refresh(order)
@@ -478,6 +484,12 @@ def deliver_order(db: Session, order_id: int, company_id: int) -> TradeOrder:
                     settle_buyer_deficit_on_delivery(db, order)
                 except ValueError as exc:
                     raise TradeOrderError(f"交割联动履约核销失败，整笔交割已回滚：{exc}")
+
+                # 先清缴后追偿：用买方清缴后的剩余自由可用自动追偿其逾期/违约借贷欠额，
+                # 绝不挪用履约冻结与在途交易占用；追偿与交割同事务、同锁集合。
+                auto_recover_borrower_loans(
+                    db, order.buyer_id, order.year, order.tx_date or _today()
+                )
 
                 order.delivered_at = datetime.utcnow()
                 db.flush()

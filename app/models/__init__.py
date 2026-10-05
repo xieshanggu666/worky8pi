@@ -27,6 +27,11 @@ from app.models.ledger import (
     LedgerEvent,
     LedgerReconciliation,
 )
+from app.models.loan import (
+    QuotaLoan,
+    QuotaLoanAuditLog,
+    QuotaLoanRepayment,
+)
 from app.models.report import MrvReport
 from app.models.user import User
 
@@ -55,4 +60,7 @@ __all__ = [
     "LedgerEvent",
     "LedgerCheckpoint",
     "LedgerReconciliation",
+    "QuotaLoan",
+    "QuotaLoanRepayment",
+    "QuotaLoanAuditLog",
 ]

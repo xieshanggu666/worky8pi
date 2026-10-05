@@ -97,6 +97,7 @@ from app.models.auction import (
     AuctionTradeReversal,
 )
 from app.models.company import Company
+from app.services.loan_service import auto_recover_borrower_loans, overdue_loan_recovery_keys
 from app.services.quota_service import settle_trade_deficit_on_auction
 
 # 场次状态
@@ -1178,8 +1179,16 @@ def settle_session(db: Session, session_id: int, operator: Operator | None) -> A
             account_keys.append(account_lock_key(acc.id))
             account_keys.append(company_clear_key(cid, session.year))
 
+        # 结算到账后可能自动追偿买方历史逾期/违约借贷欠额：把相关借贷键与
+        # 受影响出借方账户/清缴键并入统一锁集合（键名字典序满足
+        # account < auction < clear < loan < order，不会形成锁环）。
+        loan_keys: set[str] = set()
+        for buyer_id in company_ids:
+            for key in overdue_loan_recovery_keys(db, buyer_id, session.year):
+                loan_keys.add(key)
+
         with locked_accounts(session_keys):
-            with locked_accounts(sorted(set(account_keys))):
+            with locked_accounts(sorted(set(account_keys) | loan_keys)):
                 try:
                     with transactional(db):
                         if _transit_session(db, session_id, (MATCHED,), SETTLED) != 1:
@@ -1250,6 +1259,15 @@ def settle_session(db: Session, session_id: int, operator: Operator | None) -> A
                                 )
                                 recovered_count += len(summary["repayments"])
 
+                        # 借贷到期清偿联动：同样在清缴之后，用买方剩余自由可用自动
+                        # 追偿其逾期/违约借贷欠额（先清缴后追偿，不挪用履约配额）。
+                        loan_recovered_count = 0
+                        for buyer_id in buyer_ids:
+                            summary = auto_recover_borrower_loans(
+                                db, buyer_id, session.year, tx_date
+                            )
+                            loan_recovered_count += len(summary["repayments"])
+
                         # 买方年度配额闭环：逐笔成交逐笔核销（先冻结后补缴，绝不触碰占用）
                         clearance_count = sum(
                             1 for t in reserved_trades
@@ -1268,7 +1286,8 @@ def settle_session(db: Session, session_id: int, operator: Operator | None) -> A
                             target_type="session", target_id=session_id, session_id=session_id,
                             detail=f"场次 {session.session_no} 统一结算：成交 {len(reserved_trades)} 笔 / "
                             f"{_num(session.matched_volume):g} 吨全部划转，联动核销买方缺口 {clearance_count} 家"
-                            + (f"，自动追偿违约欠额 {recovered_count} 笔" if recovered_count else ""),
+                            + (f"，自动追偿违约欠额 {recovered_count} 笔" if recovered_count else "")
+                            + (f"，自动追偿借贷欠额 {loan_recovered_count} 笔" if loan_recovered_count else ""),
                         )
                         db.flush()
                         db.refresh(session)

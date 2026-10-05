@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.models.allowance import AllowanceAccount, AllowanceTransaction, ComplianceRecord, Quota
 from app.models.company import Company
 from app.models.emission import ActivityData, EmissionResult
+from app.models.loan import QuotaLoan
 from app.models.user import User
 
 
@@ -57,6 +58,24 @@ def dashboard_stats(db: Session, year: int | None = None, user: User | None = No
     frozen_total = sum_column(AllowanceAccount, AllowanceAccount.frozen_balance)
     reserved_total = sum_column(AllowanceAccount, AllowanceAccount.reserved_balance)
 
+    # 配额借贷：在贷未偿（active/overdue/defaulted 的未还余额合计，企业口径含出借与借入）
+    loan_query = db.query(QuotaLoan).filter(
+        QuotaLoan.status.in_(["active", "overdue", "defaulted"])
+    )
+    if company_ids is not None:
+        loan_query = loan_query.filter(
+            QuotaLoan.lender_id.in_(company_ids) | QuotaLoan.borrower_id.in_(company_ids)
+        )
+    if year is not None:
+        loan_query = loan_query.filter(QuotaLoan.year == year)
+    outstanding_loan_total = sum(
+        max(float(loan.amount) - float(loan.repaid_amount or 0), 0.0)
+        for loan in loan_query.all()
+    )
+    overdue_loan_count = loan_query.filter(
+        QuotaLoan.status.in_(["overdue", "defaulted"])
+    ).count()
+
     account_id_query = db.query(AllowanceAccount.id)
     if company_ids is not None:
         account_id_query = account_id_query.filter(AllowanceAccount.company_id.in_(company_ids))
@@ -87,4 +106,6 @@ def dashboard_stats(db: Session, year: int | None = None, user: User | None = No
         "transaction_count": tx_query.count(),
         "compliance_counts": {"compliant": compliant, "deficit": deficit, "pending": pending},
         "accounts": account_query.count(),
+        "outstanding_loan_total": round(float(outstanding_loan_total), 4),
+        "overdue_loan_count": overdue_loan_count,
     }

@@ -119,6 +119,7 @@ def account_transactions(account_id: int, db: Session = Depends(get_db), user: U
             "reserved_after": float(getattr(t, "reserved_after", 0) or 0),
             "trade_order_id": getattr(t, "trade_order_id", None),
             "auction_trade_id": getattr(t, "auction_trade_id", None),
+            "loan_id": getattr(t, "loan_id", None),
             "remark": t.remark,
         }
         for t in txs

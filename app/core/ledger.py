@@ -53,6 +53,16 @@ def trade_order_key(order_id: int) -> str:
     return f"order:{order_id}"
 
 
+def quota_loan_key(loan_id: int) -> str:
+    """配额借贷单键：确认/撤销/放款/归还/违约追偿状态机的进程内串行化。
+
+    锁序上位于 ``clear:`` 与 ``order:`` 之间（account < auction < clear < loan < order），
+    交割/结算事务自动追偿借贷欠额时同时持有账户、清缴、订单（或场次）与借贷键，
+    按名排序获取不会形成锁环。
+    """
+    return f"loan:{loan_id}"
+
+
 def auction_session_key(session_id: int) -> str:
     """竞价场次键：报价/撤单/撮合/结算/撤场的进程内串行化。
 
